@@ -1,0 +1,316 @@
+// 定義類型和接口
+interface PlayerOptions {
+    autoplay?: boolean;
+    controls?: boolean;
+    muted?: boolean;
+    width?: number;
+    height?: number;
+}
+
+interface VideoSource {
+    src: string;
+    type: 'hls' | 'dash';
+}
+
+interface PlayerEvents {
+    timeupdate: { currentTime: number; duration: number };
+    loadedmetadata: { duration: number; videoWidth: number; videoHeight: number };
+    error: Error;
+    sourceLoaded: void;
+}
+
+// 自定義事件發射器類型
+type EventCallback<T> = (data: T) => void;
+
+class CustomVideoPlayer {
+    private container: HTMLElement;
+    private videoElement: HTMLVideoElement;
+    private options: Required<PlayerOptions>;
+    private hlsPlayer: typeof Hls | null = null;
+    private dashPlayer: any | null = null;
+    private eventListeners: Map<keyof PlayerEvents, EventCallback<any>[]>;
+
+    constructor(containerSelector: string, options: PlayerOptions = {}) {
+        const container = document.querySelector(containerSelector);
+        if (!container) {
+            throw new Error(`Container ${containerSelector} not found`);
+        }
+
+        this.container = container as HTMLElement;
+        this.options = {
+            autoplay: options.autoplay ?? false,
+            controls: options.controls ?? true,
+            muted: options.muted ?? false,
+            width: options.width ?? 640,
+            height: options.height ?? 360
+        };
+
+        this.eventListeners = new Map();
+        this.initialize();
+    }
+
+    private initialize(): void {
+        this.createVideoElement();
+        this.createControls();
+        this.setupEventListeners();
+    }
+
+    private createVideoElement(): void {
+        this.videoElement = document.createElement('video');
+        this.videoElement.className = 'custom-video-player';
+        
+        Object.assign(this.videoElement, {
+            controls: this.options.controls,
+            autoplay: this.options.autoplay,
+            muted: this.options.muted,
+            width: this.options.width,
+            height: this.options.height
+        });
+
+        this.container.appendChild(this.videoElement);
+    }
+
+    private createControls(): void {
+        const controls = document.createElement('div');
+        controls.className = 'custom-controls';
+
+        // 建立控制元件
+        const playButton = this.createButton('play-pause', '▶', () => this.togglePlay());
+        const progressBar = this.createProgressBar();
+        const volumeControl = this.createVolumeControl();
+        const fullscreenButton = this.createButton('fullscreen', '⛶', () => this.toggleFullscreen());
+
+        controls.append(playButton, progressBar, volumeControl, fullscreenButton);
+        this.container.appendChild(controls);
+    }
+
+    private createButton(
+        className: string, 
+        innerHTML: string, 
+        onClick: () => void
+    ): HTMLButtonElement {
+        const button = document.createElement('button');
+        button.className = className;
+        button.innerHTML = innerHTML;
+        button.onclick = onClick;
+        return button;
+    }
+
+    private createProgressBar(): HTMLInputElement {
+        const progress = document.createElement('input');
+        progress.type = 'range';
+        progress.className = 'progress-bar';
+        progress.min = '0';
+        progress.max = '100';
+        progress.value = '0';
+
+        progress.addEventListener('input', (e: Event) => {
+            const target = e.target as HTMLInputElement;
+            this.seek(Number(target.value));
+        });
+
+        return progress;
+    }
+
+    private createVolumeControl(): HTMLInputElement {
+        const volume = document.createElement('input');
+        volume.type = 'range';
+        volume.className = 'volume-control';
+        volume.min = '0';
+        volume.max = '1';
+        volume.step = '0.1';
+        volume.value = '1';
+
+        volume.addEventListener('input', (e: Event) => {
+            const target = e.target as HTMLInputElement;
+            this.setVolume(Number(target.value));
+        });
+
+        return volume;
+    }
+
+    public async loadSource(source: VideoSource): Promise<void> {
+        try {
+            switch (source.type) {
+                case 'hls':
+                    await this.setupHLS(source.src);
+                    break;
+                case 'dash':
+                    await this.setupDASH(source.src);
+                    break;
+                default:
+                    throw new Error(`Unsupported source type: ${source.type}`);
+            }
+        } catch (error) {
+            this.emit('error', error as Error);
+        }
+    }
+
+    private async setupHLS(source: string): Promise<void> {
+        try {
+            if (!this.hlsPlayer) {
+                const Hls = (await import('hls.js')).default;
+
+                if (Hls.isSupported()) {
+                    this.hlsPlayer = new Hls({
+                        debug: false,
+                        enableWorker: true,
+                        lowLatencyMode: true,
+                        backBufferLength: 90
+                    });
+
+                    this.hlsPlayer.attachMedia(this.videoElement);
+                    this.hlsPlayer.loadSource(source);
+
+                    this.hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
+                        this.emit('sourceLoaded', undefined);
+                    });
+
+                    this.setupHLSErrorHandling();
+                } else if (this.videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+                    this.videoElement.src = source;
+                    this.emit('sourceLoaded', undefined);
+                } else {
+                    throw new Error('HLS is not supported in this browser');
+                }
+            }
+        } catch (error) {
+            this.emit('error', error as Error);
+        }
+    }
+
+    private async setupDASH(source: string): Promise<void> {
+        try {
+            if (!this.dashPlayer) {
+                const dashjs = (await import('dashjs')).default;
+                
+                this.dashPlayer = dashjs.MediaPlayer().create();
+                this.dashPlayer.initialize(this.videoElement, source, this.options.autoplay);
+
+                this.dashPlayer.updateSettings({
+                    debug: {
+                        logLevel: dashjs.Debug.LOG_LEVEL_ERROR
+                    },
+                    streaming: {
+                        buffer: {
+                            fastSwitchEnabled: true,
+                            bufferTimeAtTopQuality: 10
+                        },
+                        abr: {
+                            autoSwitchBitrate: {
+                                video: true
+                            }
+                        }
+                    }
+                });
+
+                this.setupDASHErrorHandling();
+                this.emit('sourceLoaded', undefined);
+            }
+        } catch (error) {
+            this.emit('error', error as Error);
+        }
+    }
+
+    private setupHLSErrorHandling(): void {
+        if (this.hlsPlayer) {
+            this.hlsPlayer.on(Hls.Events.ERROR, (event: any, data: any) => {
+                if (data.fatal) {
+                    switch (data.type) {
+                        case Hls.ErrorTypes.NETWORK_ERROR:
+                            this.hlsPlayer?.startLoad();
+                            break;
+                        case Hls.ErrorTypes.MEDIA_ERROR:
+                            this.hlsPlayer?.recoverMediaError();
+                            break;
+                        default:
+                            this.initialize();
+                            break;
+                    }
+                }
+            });
+        }
+    }
+
+    private setupDASHErrorHandling(): void {
+        this.dashPlayer?.on('error', (error: Error) => {
+            this.emit('error', error);
+        });
+    }
+
+    private setupEventListeners(): void {
+        this.videoElement.addEventListener('loadedmetadata', () => {
+            this.emit('loadedmetadata', {
+                duration: this.videoElement.duration,
+                videoWidth: this.videoElement.videoWidth,
+                videoHeight: this.videoElement.videoHeight
+            });
+        });
+
+        this.videoElement.addEventListener('timeupdate', () => {
+            this.emit('timeupdate', {
+                currentTime: this.videoElement.currentTime,
+                duration: this.videoElement.duration
+            });
+        });
+    }
+
+    // 公共方法
+    public togglePlay(): void {
+        if (this.videoElement.paused) {
+            this.videoElement.play().catch(error => this.emit('error', error));
+        } else {
+            this.videoElement.pause();
+        }
+    }
+
+    public seek(percentage: number): void {
+        const time = (percentage / 100) * this.videoElement.duration;
+        if (!isNaN(time)) {
+            this.videoElement.currentTime = time;
+        }
+    }
+
+    public setVolume(value: number): void {
+        if (value >= 0 && value <= 1) {
+            this.videoElement.volume = value;
+        }
+    }
+
+    public toggleFullscreen(): void {
+        if (!document.fullscreenElement) {
+            this.container.requestFullscreen().catch(error => this.emit('error', error));
+        } else {
+            document.exitFullscreen().catch(error => this.emit('error', error));
+        }
+    }
+
+    // 事件處理
+    public on<K extends keyof PlayerEvents>(
+        event: K,
+        callback: EventCallback<PlayerEvents[K]>
+    ): void {
+        if (!this.eventListeners.has(event)) {
+            this.eventListeners.set(event, []);
+        }
+        this.eventListeners.get(event)?.push(callback);
+    }
+
+    private emit<K extends keyof PlayerEvents>(
+        event: K,
+        data: PlayerEvents[K]
+    ): void {
+        this.eventListeners.get(event)?.forEach(callback => callback(data));
+    }
+
+    // 清理資源
+    public destroy(): void {
+        this.hlsPlayer?.destroy();
+        this.dashPlayer?.destroy();
+        this.container.innerHTML = '';
+        this.eventListeners.clear();
+    }
+}
+
+// 使用示例
+export default CustomVideoPlayer;
