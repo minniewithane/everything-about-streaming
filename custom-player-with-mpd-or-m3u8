@@ -1,0 +1,262 @@
+// 基礎播放器類
+class CustomVideoPlayer {
+    constructor(containerSelector, options = {}) {
+        this.container = document.querySelector(containerSelector);
+        this.options = {
+            autoplay: options.autoplay || false,
+            controls: options.controls || true,
+            muted: options.muted || false,
+            ...options
+        };
+        
+        this.videoElement = null;
+        this.hlsPlayer = null;
+        this.dashPlayer = null;
+        
+        this.initialize();
+    }
+
+    // 初始化播放器
+    initialize() {
+        this.createVideoElement();
+        this.createControls();
+        this.setupEventListeners();
+    }
+
+    // 創建視頻元素
+    createVideoElement() {
+        this.videoElement = document.createElement('video');
+        this.videoElement.className = 'custom-video-player';
+        
+        Object.assign(this.videoElement, {
+            controls: this.options.controls,
+            autoplay: this.options.autoplay,
+            muted: this.options.muted
+        });
+
+        this.container.appendChild(this.videoElement);
+    }
+
+    // 加載視頻源
+    loadSource(source) {
+        const sourceType = this.detectSourceType(source);
+        
+        switch (sourceType) {
+            case 'hls':
+                this.setupHLS(source);
+                break;
+            case 'dash':
+                this.setupDASH(source);
+                break;
+            default:
+                console.error('Unsupported source type');
+        }
+    }
+
+    // 檢測源類型
+    detectSourceType(source) {
+        if (source.endsWith('.m3u8')) {
+            return 'hls';
+        } else if (source.endsWith('.mpd')) {
+            return 'dash';
+        }
+        return 'unknown';
+    }
+
+    // 設置 HLS
+    async setupHLS(source) {
+        if (!this.hlsPlayer) {
+            const Hls = (await import('hls.js')).default;
+            
+            if (Hls.isSupported()) {
+                this.hlsPlayer = new Hls({
+                    debug: false,
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    backBufferLength: 90,
+                    manifestLoadingTimeOut: 10000,
+                    manifestLoadingMaxRetry: 3,
+                    manifestLoadingRetryDelay: 500,
+                });
+
+                this.hlsPlayer.attachMedia(this.videoElement);
+                this.hlsPlayer.loadSource(source);
+
+                this.hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
+                    console.log('HLS manifest loaded');
+                    this.emit('sourceLoaded');
+                });
+
+                this.setupHLSErrorHandling();
+            } else if (this.videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+                // Native HLS support (Safari)
+                this.videoElement.src = source;
+            }
+        }
+    }
+
+    // 設置 DASH
+    async setupDASH(source) {
+        if (!this.dashPlayer) {
+            const dashjs = (await import('dashjs')).default;
+            
+            this.dashPlayer = dashjs.MediaPlayer().create();
+            this.dashPlayer.initialize(this.videoElement, source, this.options.autoplay);
+            
+            this.dashPlayer.updateSettings({
+                debug: {
+                    logLevel: dashjs.Debug.LOG_LEVEL_ERROR
+                },
+                streaming: {
+                    buffer: {
+                        fastSwitchEnabled: true,
+                        bufferTimeAtTopQuality: 10,
+                        bufferTimeAtTopQualityLongForm: 10
+                    },
+                    abr: {
+                        autoSwitchBitrate: {
+                            video: true
+                        }
+                    }
+                }
+            });
+
+            this.setupDASHErrorHandling();
+        }
+    }
+
+    // HLS 錯誤處理
+    setupHLSErrorHandling() {
+        this.hlsPlayer.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal) {
+                switch (data.type) {
+                    case Hls.ErrorTypes.NETWORK_ERROR:
+                        this.hlsPlayer.startLoad();
+                        break;
+                    case Hls.ErrorTypes.MEDIA_ERROR:
+                        this.hlsPlayer.recoverMediaError();
+                        break;
+                    default:
+                        this.initializePlayer();
+                        break;
+                }
+            }
+        });
+    }
+
+    // DASH 錯誤處理
+    setupDASHErrorHandling() {
+        this.dashPlayer.on('error', (error) => {
+            console.error('DASH player error:', error);
+            this.emit('error', error);
+        });
+    }
+
+    // 創建自定義控制項
+    createControls() {
+        const controls = document.createElement('div');
+        controls.className = 'custom-controls';
+
+        // 播放/暫停按鈕
+        const playButton = document.createElement('button');
+        playButton.innerHTML = '▶';
+        playButton.onclick = () => this.togglePlay();
+
+        // 進度條
+        const progress = document.createElement('input');
+        progress.type = 'range';
+        progress.min = 0;
+        progress.max = 100;
+        progress.value = 0;
+        progress.onchange = (e) => this.seek(e.target.value);
+
+        // 音量控制
+        const volume = document.createElement('input');
+        volume.type = 'range';
+        volume.min = 0;
+        volume.max = 1;
+        volume.step = 0.1;
+        volume.value = 1;
+        volume.onchange = (e) => this.setVolume(e.target.value);
+
+        controls.appendChild(playButton);
+        controls.appendChild(progress);
+        controls.appendChild(volume);
+
+        this.container.appendChild(controls);
+    }
+
+    // 播放控制
+    togglePlay() {
+        if (this.videoElement.paused) {
+            this.videoElement.play();
+        } else {
+            this.videoElement.pause();
+        }
+    }
+
+    // 跳轉控制
+    seek(time) {
+        this.videoElement.currentTime = (time / 100) * this.videoElement.duration;
+    }
+
+    // 音量控制
+    setVolume(value) {
+        this.videoElement.volume = value;
+    }
+
+    // 事件監聽器設置
+    setupEventListeners() {
+        this.videoElement.addEventListener('loadedmetadata', () => {
+            this.emit('loadedmetadata', {
+                duration: this.videoElement.duration,
+                videoWidth: this.videoElement.videoWidth,
+                videoHeight: this.videoElement.videoHeight
+            });
+        });
+
+        this.videoElement.addEventListener('timeupdate', () => {
+            this.emit('timeupdate', {
+                currentTime: this.videoElement.currentTime,
+                duration: this.videoElement.duration
+            });
+        });
+
+        // 添加更多事件監聽...
+    }
+
+    // 事件發送器
+    emit(eventName, data) {
+        const event = new CustomEvent(eventName, { detail: data });
+        this.container.dispatchEvent(event);
+    }
+
+    // 銷毀播放器
+    destroy() {
+        if (this.hlsPlayer) {
+            this.hlsPlayer.destroy();
+        }
+        if (this.dashPlayer) {
+            this.dashPlayer.destroy();
+        }
+        this.container.innerHTML = '';
+    }
+}
+
+// 使用示例
+const player = new CustomVideoPlayer('#video-container', {
+    autoplay: true,
+    muted: true
+});
+
+// 加載 HLS 源
+player.loadSource('https://example.com/video.m3u8');
+
+// 監聽事件
+player.container.addEventListener('sourceLoaded', () => {
+    console.log('Video source loaded successfully');
+});
+
+player.container.addEventListener('timeupdate', (e) => {
+    console.log('Current time:', e.detail.currentTime);
+});
